@@ -552,6 +552,10 @@ def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[li
     if not graphs:
         raise PlotError("No valid data to plot.")
 
+    if config.log_y:
+        canvas.SetLogy(1)
+    if config.log_x:
+        canvas.SetLogx(1)
     mg.Draw("A")
 
     auto_x = (config.x_min == config.x_max == 0.0)
