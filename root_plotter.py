@@ -1055,7 +1055,8 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
 
     with _suppress_root_output():
         try:
-            ret = ROOT.gROOT.ProcessFile(path)
+            escaped = path.replace('"', '\\"')
+            ROOT.gROOT.ProcessLine(f'.x "{escaped}"')
         except Exception as exc:
             raise PlotError(f"Failed to execute macro: {exc}") from exc
 
