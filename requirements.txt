@@ -1,0 +1,5 @@
+PyQt5>=5.15
+# ROOT must be installed separately (not available via pip).
+# Install via conda:  conda install -c conda-forge root
+# Or from source:     https://root.cern/install/
+# Verify:             python -c "import ROOT; print(ROOT.__version__)"
