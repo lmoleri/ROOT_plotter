@@ -159,12 +159,28 @@ def _split_tokens(text: str) -> List[str]:
     return [t for t in re.split(r"[,\s]+", text.strip()) if t]
 
 
-def parse_1d_values(text: str) -> List[float]:
+def parse_1d_values(text: str) -> List[Tuple[float, float]]:
+    """Parse 1D values. Returns (value, weight) pairs.
+
+    Supports two formats:
+    - 1-column: flat tokens → weight=1.0 for each
+    - 2-column: 'value weight' per line (used when loading a macro)
+    """
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    if lines and all(len(_split_tokens(ln)) >= 2 for ln in lines):
+        result = []
+        for i, line in enumerate(lines, 1):
+            cols = _split_tokens(line)
+            try:
+                result.append((float(cols[0]), float(cols[1])))
+            except ValueError as exc:
+                raise PlotError(f"Non-numeric value on line {i}: {exc}") from exc
+        return result
     tokens = _split_tokens(text)
     if not tokens:
         raise PlotError("No data found. Enter numbers separated by spaces, commas, or newlines.")
     try:
-        return [float(t) for t in tokens]
+        return [(float(t), 1.0) for t in tokens]
     except ValueError as exc:
         raise PlotError(f"Non-numeric value: {exc}") from exc
 
@@ -212,13 +228,13 @@ def _open_csv(path: str):
     return open(path, newline="", encoding="utf-8-sig")
 
 
-def load_csv_1d(path: str) -> List[float]:
+def load_csv_1d(path: str) -> List[Tuple[float, float]]:
+    """Load 1D data from CSV. Returns (value, weight) pairs; weight from 2nd column or 1.0."""
     with _open_csv(path) as f:
         reader = csv.reader(f)
         rows = list(reader)
     if not rows:
         raise PlotError(f"CSV file is empty: {path}")
-    # skip header row if first cell is non-numeric
     start = 0
     try:
         float(rows[0][0])
@@ -229,7 +245,9 @@ def load_csv_1d(path: str) -> List[float]:
         if not row or not row[0].strip():
             continue
         try:
-            result.append(float(row[0]))
+            v = float(row[0])
+            w = float(row[1]) if len(row) > 1 and row[1].strip() else 1.0
+            result.append((v, w))
         except ValueError as exc:
             raise PlotError(f"Non-numeric value on CSV row {i}: {exc}") from exc
     if not result:
@@ -331,7 +349,22 @@ def _suppress_root_output():
         os.close(devnull)
 
 
-def _get_1d_data(series: SeriesData) -> List[float]:
+def _c_esc(s: str) -> str:
+    """Escape a Python string for embedding in a C double-quoted literal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _color_to_hex(color_index: int) -> str:
+    """Convert a ROOT color index to '#rrggbb'."""
+    tc = ROOT.gROOT.GetColor(int(color_index))
+    if not tc:
+        return "#000000"
+    return "#{:02x}{:02x}{:02x}".format(
+        int(tc.GetRed() * 255), int(tc.GetGreen() * 255), int(tc.GetBlue() * 255)
+    )
+
+
+def _get_1d_data(series: SeriesData) -> List[Tuple[float, float]]:
     if series.use_csv:
         if not series.csv_path:
             raise PlotError("No CSV file selected.")
@@ -407,8 +440,8 @@ def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list
 
         auto_range = (config.x_min == config.x_max == 0.0)
         if auto_range:
-            vmin = min(values)
-            vmax = max(values)
+            vmin = min(v for v, _ in values)
+            vmax = max(v for v, _ in values)
             margin = (vmax - vmin) * 0.05 if vmax > vmin else 1.0
             vmin -= margin
             vmax += margin
@@ -417,8 +450,8 @@ def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list
 
         h = ROOT.TH1F(f"rph1f_{uid}_{i}", "", config.n_bins_x, vmin, vmax)
         h.SetDirectory(0)
-        for v in values:
-            h.Fill(v)
+        for v, w in values:
+            h.Fill(v, w)
 
         h.SetLineColor(series.color_index)
         h.SetLineWidth(series.line_width)
@@ -614,6 +647,454 @@ def export_pdf(config: PlotConfig, output_path: str) -> None:
         canvas.SaveAs(output_path)
     if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
         raise PlotError(f"ROOT failed to write PDF: {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# C macro generation helpers
+# ---------------------------------------------------------------------------
+
+def _macro_gstyle(L: list) -> None:
+    L += [
+        "  gStyle->SetOptStat(0);",
+        "  gStyle->SetOptTitle(1);",
+        '  gStyle->SetTitleFont(42, "");',
+        '  gStyle->SetTitleSize(0.052, "");',
+        '  gStyle->SetLabelFont(42, "xyz");',
+        '  gStyle->SetTitleFont(42, "xyz");',
+        '  gStyle->SetTitleSize(0.048, "xyz");',
+        '  gStyle->SetLabelSize(0.042, "xyz");',
+        "  gStyle->SetPadTickX(1);",
+        "  gStyle->SetPadTickY(1);",
+        "  gStyle->SetPadLeftMargin(0.13);",
+        "  gStyle->SetPadBottomMargin(0.12);",
+        "",
+    ]
+
+
+def _macro_legend(L: list, var_names: list, mode: str) -> None:
+    n = len(var_names)
+    y1 = max(0.60, 0.92 - n * 0.07)
+    L.append(f"  TLegend *leg = new TLegend(0.65, {y1:.4f}, 0.92, 0.92);")
+    L.append("  leg->SetBorderSize(0); leg->SetFillStyle(0);")
+    L.append("  leg->SetTextFont(42); leg->SetTextSize(0.038);")
+    for vname, series in var_names:
+        entry = "f" if (mode == "h" and series.fill_style > 0) else ("l" if mode == "h" else "lp")
+        L.append(f'  leg->AddEntry({vname}, "{_c_esc(series.name)}", "{entry}");')
+    L.append("  leg->Draw();")
+
+
+def _macro_th1f(L: list, config: PlotConfig) -> None:
+    valid: list = []
+    for i, series in enumerate(config.series):
+        try:
+            values = _get_1d_data(series)
+        except PlotError:
+            continue
+        if values:
+            valid.append((i, series, values))
+
+    if not valid:
+        L.append("  // No valid series data")
+        return
+
+    auto_x = (config.x_min == config.x_max == 0.0)
+    if auto_x:
+        all_vs = [v for _, _, vals in valid for v, _ in vals]
+        vmin = min(all_vs); vmax = max(all_vs)
+        margin = (vmax - vmin) * 0.05 if vmax > vmin else 1.0
+        xmin, xmax = vmin - margin, vmax + margin
+    else:
+        xmin, xmax = config.x_min, config.x_max
+
+    nbins = config.n_bins_x
+    title_str = f"{_c_esc(config.title)};{_c_esc(config.x_title)};{_c_esc(config.y_title)}"
+
+    var_names = []
+    for i, series, values in valid:
+        n = len(values)
+        vals_s = ", ".join(f"{v:.6g}" for v, _ in values)
+        wgts_s = ", ".join(f"{w:.6g}" for _, w in values)
+        vn = f"h_{i}"
+        L += [
+            f"  // Series: {series.name}",
+            f"  const int N_{i} = {n};",
+            f"  Double_t vals_{i}[] = {{{vals_s}}};",
+            f"  Double_t wgts_{i}[] = {{{wgts_s}}};",
+            f'  TH1F *{vn} = new TH1F("{_c_esc(series.name)}", "{title_str}",'
+            f" {nbins}, {xmin:.6g}, {xmax:.6g});",
+            f"  {vn}->SetDirectory(0);",
+            f"  for (int j = 0; j < N_{i}; j++) {vn}->Fill(vals_{i}[j], wgts_{i}[j]);",
+            f'  {vn}->SetLineColor(TColor::GetColor("{series.color_hex}"));',
+            f"  {vn}->SetLineWidth({series.line_width});",
+        ]
+        if series.fill_style > 0:
+            L.append(f'  {vn}->SetFillColor(TColor::GetColor("{series.color_hex}"));')
+            L.append(f"  {vn}->SetFillStyle({series.fill_style});")
+        draw_opt = series.draw_style if not var_names else f"{series.draw_style} SAME"
+        L.append(f'  {vn}->Draw("{draw_opt}");')
+        L.append("")
+        var_names.append((vn, series))
+
+    if not (config.y_min == config.y_max == 0.0):
+        L.append(f"  {var_names[0][0]}->GetYaxis()->SetRangeUser({config.y_min:.6g}, {config.y_max:.6g});")
+
+    if config.show_legend:
+        _macro_legend(L, var_names, "h")
+
+
+def _macro_tgraph(L: list, config: PlotConfig) -> None:
+    L.append("  TMultiGraph *mg = new TMultiGraph();")
+    L.append(f'  mg->SetTitle("{_c_esc(config.title)};{_c_esc(config.x_title)};{_c_esc(config.y_title)}");')
+    L.append("")
+
+    var_names = []
+    for i, series in enumerate(config.series):
+        try:
+            rows = _get_2col_data(series)
+        except PlotError:
+            continue
+        if not rows:
+            continue
+        n = len(rows)
+        xs_s = ", ".join(f"{x:.6g}" for x, _, _, _ in rows)
+        ys_s = ", ".join(f"{y:.6g}" for _, y, _, _ in rows)
+        exs_s = ", ".join(f"{ex:.6g}" for _, _, ex, _ in rows)
+        eys_s = ", ".join(f"{ey:.6g}" for _, _, _, ey in rows)
+        vn = f"g_{i}"
+        L += [
+            f"  // Series: {series.name}",
+            f"  const int N_{i} = {n};",
+            f"  Double_t x_{i}[] = {{{xs_s}}};",
+            f"  Double_t y_{i}[] = {{{ys_s}}};",
+            f"  Double_t ex_{i}[] = {{{exs_s}}};",
+            f"  Double_t ey_{i}[] = {{{eys_s}}};",
+            f"  TGraphErrors *{vn} = new TGraphErrors(N_{i}, x_{i}, y_{i}, ex_{i}, ey_{i});",
+            f'  {vn}->SetTitle("{_c_esc(series.name)}");',
+            f"  {vn}->SetMarkerStyle({series.marker_style});",
+            f'  {vn}->SetMarkerColor(TColor::GetColor("{series.color_hex}"));',
+            f"  {vn}->SetMarkerSize(1.2);",
+            f'  {vn}->SetLineColor(TColor::GetColor("{series.color_hex}"));',
+            f"  {vn}->SetLineWidth({series.line_width});",
+            f'  mg->Add({vn}, "{series.draw_style}");',
+            "",
+        ]
+        var_names.append((vn, series))
+
+    if not var_names:
+        L.append("  // No valid series data")
+        return
+
+    L.append('  mg->Draw("A");')
+    if not (config.x_min == config.x_max == 0.0):
+        L.append(f"  mg->GetXaxis()->SetLimits({config.x_min:.6g}, {config.x_max:.6g});")
+    if not (config.y_min == config.y_max == 0.0):
+        L.append(f"  mg->GetYaxis()->SetRangeUser({config.y_min:.6g}, {config.y_max:.6g});")
+
+    if config.show_legend:
+        _macro_legend(L, var_names, "g")
+
+
+def _macro_th2f(L: list, config: PlotConfig) -> None:
+    if not config.series:
+        return
+    series = config.series[0]
+    try:
+        rows = _get_3col_data(series)
+    except PlotError:
+        L.append("  // No valid data for TH2F")
+        return
+    if not rows:
+        return
+
+    xs = [r[0] for r in rows]; ys = [r[1] for r in rows]
+    auto_x = (config.x_min == config.x_max == 0.0)
+    auto_y = (config.y_min == config.y_max == 0.0)
+    if auto_x:
+        sx = max(xs) - min(xs) if max(xs) > min(xs) else 1.0
+        xmin, xmax = min(xs) - sx * 0.05, max(xs) + sx * 0.05
+    else:
+        xmin, xmax = config.x_min, config.x_max
+    if auto_y:
+        sy = max(ys) - min(ys) if max(ys) > min(ys) else 1.0
+        ymin, ymax = min(ys) - sy * 0.05, max(ys) + sy * 0.05
+    else:
+        ymin, ymax = config.y_min, config.y_max
+
+    n = len(rows)
+    xs_s = ", ".join(f"{r[0]:.6g}" for r in rows)
+    ys_s = ", ".join(f"{r[1]:.6g}" for r in rows)
+    ws_s = ", ".join(f"{r[2]:.6g}" for r in rows)
+    title_str = (f"{_c_esc(config.title)};{_c_esc(config.x_title)};"
+                 f"{_c_esc(config.y_title)};{_c_esc(config.z_title)}")
+
+    if "COLZ" in config.th2f_draw_option or "CONT" in config.th2f_draw_option:
+        L.append("  c->SetRightMargin(0.15);")
+    L += [
+        f"  const int N = {n};",
+        f"  Double_t x_[] = {{{xs_s}}};",
+        f"  Double_t y_[] = {{{ys_s}}};",
+        f"  Double_t w_[] = {{{ws_s}}};",
+        f'  TH2F *h2 = new TH2F("{_c_esc(series.name)}", "{title_str}",'
+        f" {config.n_bins_x}, {xmin:.6g}, {xmax:.6g},"
+        f" {config.n_bins_y}, {ymin:.6g}, {ymax:.6g});",
+        "  h2->SetDirectory(0);",
+        "  for (int j = 0; j < N; j++) h2->Fill(x_[j], y_[j], w_[j]);",
+        f'  h2->Draw("{config.th2f_draw_option}");',
+        "",
+    ]
+
+
+def export_macro(config: PlotConfig, output_path: str) -> None:
+    """Generate a self-contained ROOT C macro that reproduces the current plot."""
+    base = os.path.splitext(os.path.basename(output_path))[0]
+    fname = re.sub(r"\W+", "_", base) or "plot"
+    if fname and fname[0].isdigit():
+        fname = "_" + fname
+
+    L: List[str] = [
+        f"void {fname}() {{",
+        "  // Generated by ROOT Plotter",
+    ]
+    _macro_gstyle(L)
+    L.append(f'  TCanvas *c = new TCanvas("c", "", {CANVAS_WIDTH}, {CANVAS_HEIGHT});')
+    L.append("")
+
+    if config.plot_type.startswith("TH1F"):
+        _macro_th1f(L, config)
+    elif config.plot_type.startswith("TGraph"):
+        _macro_tgraph(L, config)
+    elif config.plot_type.startswith("TH2F"):
+        _macro_th2f(L, config)
+
+    if config.log_x:
+        L.append("  c->SetLogx();")
+    if config.log_y:
+        L.append("  c->SetLogy();")
+    if config.log_z and config.plot_type.startswith("TH2F"):
+        L.append("  c->SetLogz();")
+
+    if config.latex_text.strip():
+        lx, ly = config.latex_x, config.latex_y
+        L += [
+            "",
+            f'  TPaveText *pave = new TPaveText({lx:.4f}, {ly:.4f},'
+            f" {lx + 0.50:.4f}, {ly + 0.065:.4f}, \"NDC\");",
+            "  pave->SetFillStyle(0); pave->SetBorderSize(0);",
+            "  pave->SetTextAlign(12); pave->SetTextFont(42); pave->SetTextSize(0.040);",
+            f'  pave->AddText("{_c_esc(config.latex_text)}");',
+            "  pave->Draw();",
+        ]
+
+    L += ["", "  c->Modified(); c->Update();", "}"]
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# ROOT file export
+# ---------------------------------------------------------------------------
+
+def export_root(config: PlotConfig, output_path: str) -> None:
+    """Save ROOT objects and the styled canvas to a .root file."""
+    uid = uuid.uuid4().hex[:8]
+    canvas, drawn, _warnings = _render_to_canvas(config, uid)
+
+    with _suppress_root_output():
+        tfile = ROOT.TFile.Open(output_path, "RECREATE")
+    if not tfile or tfile.IsZombie():
+        raise PlotError(f"Cannot create ROOT file: {output_path}")
+
+    canvas.Write("canvas")
+    _data_classes = ("TH1F", "TH2F", "TMultiGraph", "TGraph", "TGraphErrors")
+    for obj in drawn:
+        if obj.ClassName() in _data_classes:
+            obj.Write()
+
+    tfile.Close()
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
+        raise PlotError(f"ROOT failed to write file: {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# C macro loading — run macro, introspect canvas, reconstruct PlotConfig
+# ---------------------------------------------------------------------------
+
+def _introspect_th1f(prims: list, config: PlotConfig, warnings: list) -> None:
+    hists = [p for p in prims if p and p.InheritsFrom("TH1") and not p.InheritsFrom("TH2")]
+    if not hists:
+        return
+    config.plot_type = "TH1F (1D Histogram)"
+    h0 = hists[0]
+    parts = h0.GetTitle().split(";")
+    config.title = parts[0] if parts else ""
+    config.x_title = parts[1] if len(parts) > 1 else ""
+    config.y_title = parts[2] if len(parts) > 2 else ""
+    config.n_bins_x = h0.GetNbinsX()
+    config.x_min = h0.GetXaxis().GetXmin()
+    config.x_max = h0.GetXaxis().GetXmax()
+
+    for i, h in enumerate(hists):
+        lines_data = []
+        for b in range(1, h.GetNbinsX() + 1):
+            content = h.GetBinContent(b)
+            if content != 0.0:
+                center = h.GetXaxis().GetBinCenter(b)
+                lines_data.append(f"{center:.6g}  {content:.6g}")
+        color_idx = int(h.GetLineColor())
+        config.series.append(SeriesData(
+            name=h.GetName() or f"Series {i + 1}",
+            raw_text="\n".join(lines_data),
+            color_index=color_idx,
+            color_hex=_color_to_hex(color_idx),
+            line_width=int(h.GetLineWidth()),
+            fill_style=int(h.GetFillStyle()),
+            draw_style="HIST",
+        ))
+
+
+def _introspect_tgraph(prims: list, config: PlotConfig, warnings: list) -> None:
+    config.plot_type = "TGraph (Scatter/Line)"
+    mgs = [p for p in prims if p and p.ClassName() == "TMultiGraph"]
+    bare = [p for p in prims
+            if p and p.InheritsFrom("TGraph") and p.ClassName() != "TMultiGraph"]
+
+    if mgs:
+        mg = mgs[0]
+        parts = mg.GetTitle().split(";")
+        config.title = parts[0] if parts else ""
+        config.x_title = parts[1] if len(parts) > 1 else ""
+        config.y_title = parts[2] if len(parts) > 2 else ""
+        gl = mg.GetListOfGraphs()
+        all_graphs = [gl.At(j) for j in range(gl.GetSize())]
+    else:
+        all_graphs = bare
+        if bare:
+            parts = bare[0].GetTitle().split(";")
+            config.title = parts[0] if parts else ""
+            config.x_title = parts[1] if len(parts) > 1 else ""
+            config.y_title = parts[2] if len(parts) > 2 else ""
+
+    for g in all_graphs:
+        if not g:
+            continue
+        n = g.GetN()
+        has_err = "Errors" in g.ClassName() or "Asymm" in g.ClassName()
+        rows = []
+        for j in range(n):
+            x, y = g.GetX()[j], g.GetY()[j]
+            ex = g.GetEX()[j] if has_err else 0.0
+            ey = g.GetEY()[j] if has_err else 0.0
+            rows.append(f"{x:.6g}  {y:.6g}  {ex:.6g}  {ey:.6g}")
+        color_idx = int(g.GetMarkerColor())
+        config.series.append(SeriesData(
+            name=g.GetTitle() or f"Series {len(config.series) + 1}",
+            raw_text="\n".join(rows),
+            color_index=color_idx,
+            color_hex=_color_to_hex(color_idx),
+            marker_style=int(g.GetMarkerStyle()),
+            line_width=int(g.GetLineWidth()),
+            draw_style="LP",
+        ))
+
+
+def _introspect_th2f(prims: list, config: PlotConfig, warnings: list) -> None:
+    h2s = [p for p in prims if p and p.InheritsFrom("TH2")]
+    if not h2s:
+        return
+    config.plot_type = "TH2F (2D Histogram)"
+    h2 = h2s[0]
+    parts = h2.GetTitle().split(";")
+    config.title = parts[0] if parts else ""
+    config.x_title = parts[1] if len(parts) > 1 else ""
+    config.y_title = parts[2] if len(parts) > 2 else ""
+    config.z_title = parts[3] if len(parts) > 3 else ""
+    config.n_bins_x = h2.GetNbinsX()
+    config.n_bins_y = h2.GetNbinsY()
+    config.x_min = h2.GetXaxis().GetXmin()
+    config.x_max = h2.GetXaxis().GetXmax()
+    config.y_min = h2.GetYaxis().GetXmin()
+    config.y_max = h2.GetYaxis().GetXmax()
+
+    lines_data = []
+    for ix in range(1, h2.GetNbinsX() + 1):
+        for iy in range(1, h2.GetNbinsY() + 1):
+            content = h2.GetBinContent(ix, iy)
+            if content != 0.0:
+                xc = h2.GetXaxis().GetBinCenter(ix)
+                yc = h2.GetYaxis().GetBinCenter(iy)
+                lines_data.append(f"{xc:.6g}  {yc:.6g}  {content:.6g}")
+
+    config.series.append(SeriesData(
+        name=h2.GetName() or "Data",
+        raw_text="\n".join(lines_data),
+    ))
+
+
+def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
+    """Execute a ROOT C macro, inspect its canvas, and return a reconstructed PlotConfig."""
+    warnings_list: List[str] = []
+
+    with _suppress_root_output():
+        try:
+            ret = ROOT.gROOT.ProcessFile(path)
+        except Exception as exc:
+            raise PlotError(f"Failed to execute macro: {exc}") from exc
+
+    clist = ROOT.gROOT.GetListOfCanvases()
+    if clist.GetSize() == 0:
+        raise PlotError("Macro did not create a TCanvas.")
+    canvas = clist.At(clist.GetSize() - 1)
+
+    config = PlotConfig()
+    config.log_x = bool(canvas.GetLogx())
+    config.log_y = bool(canvas.GetLogy())
+    config.log_z = bool(canvas.GetLogz())
+    config.series = []
+
+    pl = canvas.GetListOfPrimitives()
+    prims = [pl.At(i) for i in range(pl.GetSize())]
+
+    # Legend and LaTeX overlay
+    for p in prims:
+        if not p:
+            continue
+        cn = p.ClassName()
+        if cn == "TLegend":
+            config.show_legend = True
+        elif cn == "TPaveText":
+            ll = p.GetListOfLines()
+            if ll and ll.GetSize() > 0:
+                t = ll.At(0)
+                if t:
+                    config.latex_text = t.GetTitle()
+            config.latex_x = float(p.GetX1NDC())
+            config.latex_y = float(p.GetY1NDC())
+
+    # Detect plot type and extract data
+    for p in prims:
+        if not p:
+            continue
+        try:
+            if p.InheritsFrom("TH2"):
+                _introspect_th2f(prims, config, warnings_list)
+                break
+            elif p.InheritsFrom("TH1"):
+                _introspect_th1f(prims, config, warnings_list)
+                break
+            elif p.ClassName() == "TMultiGraph":
+                _introspect_tgraph(prims, config, warnings_list)
+                break
+            elif p.InheritsFrom("TGraph"):
+                _introspect_tgraph(prims, config, warnings_list)
+                break
+        except Exception as exc:
+            warnings_list.append(f"Introspection warning: {exc}")
+
+    if not config.series:
+        raise PlotError("No recognizable plot objects (TH1, TGraph, TH2) found in macro canvas.")
+
+    return config, warnings_list
 
 
 # ---------------------------------------------------------------------------
@@ -1097,6 +1578,73 @@ class PlotSettingsPanel(QScrollArea):
         sw.deleteLater()
         self.config_changed.emit()
 
+    def apply_config(self, config: PlotConfig) -> None:
+        """Populate all widgets from a PlotConfig (used when loading a macro)."""
+        self.blockSignals(True)
+        try:
+            # Plot type — triggers _on_plot_type_changed (visibility only; config_changed blocked)
+            idx = PLOT_TYPES.index(config.plot_type) if config.plot_type in PLOT_TYPES else 0
+            self.plot_type_combo.setCurrentIndex(idx)
+
+            self.title_edit.setText(config.title)
+            self.x_title_edit.setText(config.x_title)
+            self.y_title_edit.setText(config.y_title)
+            self.z_title_edit.setText(config.z_title)
+            self.nbins_x_spin.setValue(config.n_bins_x)
+            self.nbins_y_spin.setValue(config.n_bins_y)
+            self.xmin_spin.setValue(config.x_min)
+            self.xmax_spin.setValue(config.x_max)
+            self.ymin_spin.setValue(config.y_min)
+            self.ymax_spin.setValue(config.y_max)
+            self.logx_cb.setChecked(config.log_x)
+            self.logy_cb.setChecked(config.log_y)
+            self.logz_cb.setChecked(config.log_z)
+            self.legend_cb.setChecked(config.show_legend)
+            self.latex_edit.setText(config.latex_text)
+            self.latex_x_spin.setValue(config.latex_x)
+            self.latex_y_spin.setValue(config.latex_y)
+            if config.th2f_draw_option in TH2F_DRAW_OPTIONS:
+                self.th2f_option_combo.setCurrentIndex(
+                    TH2F_DRAW_OPTIONS.index(config.th2f_draw_option)
+                )
+
+            # Rebuild series widgets
+            for sw in list(self._series_widgets):
+                self._series_layout.removeWidget(sw)
+                sw.setParent(None)  # type: ignore[arg-type]
+                sw.deleteLater()
+            self._series_widgets.clear()
+
+            series_list = config.series if config.series else [SeriesData()]
+            style_list = (
+                TH1F_DRAW_STYLES if config.plot_type.startswith("TH1F") else TGRAPH_DRAW_STYLES
+            )
+            for series in series_list:
+                sw = SeriesWidget(len(self._series_widgets), config.plot_type, self)
+                sw.changed.connect(self.config_changed)
+                sw.remove_btn.clicked.connect(
+                    lambda checked=False, w=sw: self._remove_series(w)
+                )
+                sw.name_edit.setText(series.name)
+                sw.text_edit.setPlainText(series.raw_text)
+                sw._color_hex = series.color_hex
+                sw._color_root = series.color_index
+                sw._update_color_button()
+                for mi, (_, mval) in enumerate(ROOT_MARKERS):
+                    if mval == series.marker_style:
+                        sw.marker_combo.setCurrentIndex(mi)
+                        break
+                for si, (_, sval) in enumerate(style_list):
+                    if sval == series.draw_style:
+                        sw.style_combo.setCurrentIndex(si)
+                        break
+                sw.lw_spin.setValue(series.line_width)
+                self._series_widgets.append(sw)
+                self._series_layout.addWidget(sw)
+        finally:
+            self.blockSignals(False)
+        self.config_changed.emit()
+
     def get_config(self) -> PlotConfig:
         series = [sw.get_series_data() for sw in self._series_widgets]
         return PlotConfig(
@@ -1160,11 +1708,28 @@ class PlotTab(QWidget):
         self.export_btn.clicked.connect(self._export_pdf)
         self.export_btn.setEnabled(False)
 
+        self.export_c_btn = QPushButton("Export .C...")
+        self.export_c_btn.setFixedHeight(28)
+        self.export_c_btn.clicked.connect(self._export_macro)
+        self.export_c_btn.setEnabled(False)
+
+        self.export_root_btn = QPushButton("Export .root...")
+        self.export_root_btn.setFixedHeight(28)
+        self.export_root_btn.clicked.connect(self._export_root_file)
+        self.export_root_btn.setEnabled(False)
+
+        self.load_c_btn = QPushButton("Load .C...")
+        self.load_c_btn.setFixedHeight(28)
+        self.load_c_btn.clicked.connect(self._load_macro_action)
+
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #888; font-style: italic; font-size: 12px;")
 
         toolbar.addWidget(self.update_btn)
         toolbar.addWidget(self.export_btn)
+        toolbar.addWidget(self.export_c_btn)
+        toolbar.addWidget(self.export_root_btn)
+        toolbar.addWidget(self.load_c_btn)
         toolbar.addStretch()
         toolbar.addWidget(self.status_label)
         outer.addLayout(toolbar)
@@ -1206,6 +1771,8 @@ class PlotTab(QWidget):
                 raise PlotError("ROOT generated an unreadable image.")
             self.preview.set_plot_pixmap(pm)
             self.export_btn.setEnabled(True)
+            self.export_c_btn.setEnabled(True)
+            self.export_root_btn.setEnabled(True)
             if warnings:
                 msg = ";  ".join(warnings)
                 self.status_label.setStyleSheet(
@@ -1220,6 +1787,8 @@ class PlotTab(QWidget):
         except PlotError as exc:
             self.preview.clear_plot()
             self.export_btn.setEnabled(False)
+            self.export_c_btn.setEnabled(False)
+            self.export_root_btn.setEnabled(False)
             self.status_label.setStyleSheet(
                 "color: #cc3333; font-style: italic; font-size: 12px;"
             )
@@ -1227,6 +1796,8 @@ class PlotTab(QWidget):
         except Exception as exc:
             self.preview.clear_plot()
             self.export_btn.setEnabled(False)
+            self.export_c_btn.setEnabled(False)
+            self.export_root_btn.setEnabled(False)
             self.status_label.setStyleSheet(
                 "color: #cc3333; font-style: italic; font-size: 12px;"
             )
@@ -1249,6 +1820,69 @@ class PlotTab(QWidget):
             QMessageBox.warning(self, "Export Failed", str(exc))
         except Exception as exc:
             QMessageBox.critical(self, "Export Error", f"Unexpected error:\n{exc}")
+
+    def _export_macro(self) -> None:
+        config = self.settings.get_config()
+        default_name = f"plot_{self._tab_index}.C"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export C Macro", default_name, "C Macros (*.C);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.endswith(".C"):
+            path += ".C"
+        try:
+            export_macro(config, path)
+            self.status_label.setStyleSheet("color: #888; font-style: italic; font-size: 12px;")
+            self.status_label.setText(f"Saved: {os.path.basename(path)}")
+        except PlotError as exc:
+            QMessageBox.warning(self, "Export Failed", str(exc))
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", f"Unexpected error:\n{exc}")
+
+    def _export_root_file(self) -> None:
+        config = self.settings.get_config()
+        default_name = f"plot_{self._tab_index}.root"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export ROOT File", default_name, "ROOT Files (*.root);;All Files (*)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".root"):
+            path += ".root"
+        try:
+            export_root(config, path)
+            self.status_label.setStyleSheet("color: #888; font-style: italic; font-size: 12px;")
+            self.status_label.setText(f"Saved: {os.path.basename(path)}")
+        except PlotError as exc:
+            QMessageBox.warning(self, "Export Failed", str(exc))
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", f"Unexpected error:\n{exc}")
+
+    def _load_macro_action(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load C Macro", "", "C Macros (*.C *.c *.cxx);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            config, warnings = load_macro(path)
+            self.settings.apply_config(config)
+            if warnings:
+                self.status_label.setStyleSheet(
+                    "color: #cc8800; font-style: italic; font-size: 12px;"
+                )
+                self.status_label.setText("Loaded with warnings: " + ";  ".join(warnings))
+            else:
+                self.status_label.setStyleSheet(
+                    "color: #888; font-style: italic; font-size: 12px;"
+                )
+                self.status_label.setText(f"Loaded: {os.path.basename(path)}")
+            self._do_render()
+        except PlotError as exc:
+            QMessageBox.warning(self, "Load Failed", str(exc))
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", f"Unexpected error:\n{exc}")
 
     def _delete_temp_png(self) -> None:
         if self._temp_png and os.path.exists(self._temp_png):
