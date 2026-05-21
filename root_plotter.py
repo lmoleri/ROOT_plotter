@@ -507,6 +507,24 @@ def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[li
             warnings.append(f"'{series.name}': no data")
             continue
 
+        if config.log_y:
+            skipped = sum(1 for _, y, _, _ in rows if y <= 0)
+            rows = [(x, y, ex, ey) for x, y, ex, ey in rows if y > 0]
+            if skipped:
+                warnings.append(
+                    f"'{series.name}': {skipped} point(s) with y ≤ 0 hidden (log Y)"
+                )
+        if config.log_x:
+            skipped = sum(1 for x, _, _, _ in rows if x <= 0)
+            rows = [(x, y, ex, ey) for x, y, ex, ey in rows if x > 0]
+            if skipped:
+                warnings.append(
+                    f"'{series.name}': {skipped} point(s) with x ≤ 0 hidden (log X)"
+                )
+        if not rows:
+            warnings.append(f"'{series.name}': no valid data after log-scale filtering")
+            continue
+
         has_errors = any(ex != 0.0 or ey != 0.0 for _, _, ex, ey in rows)
 
         n = len(rows)
