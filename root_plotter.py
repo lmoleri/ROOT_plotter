@@ -1059,17 +1059,27 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
 
     try:
         abs_path = os.path.abspath(path)
-        file_dir = os.path.dirname(abs_path)
         filename = os.path.basename(abs_path)
+        funcname = re.sub(r"\W+", "_", os.path.splitext(filename)[0])
+
+        # Read with Python to avoid ROOT's path resolver (which chokes on spaces)
+        with open(abs_path, "r") as fh:
+            code = fh.read()
+
         n_before = ROOT.gROOT.GetListOfCanvases().GetSize()
-        # ROOT's .x cannot handle spaces in paths. Use gSystem.ChangeDirectory()
-        # (ROOT's own cwd, not the OS cwd) so .x sees only the space-free filename.
-        orig_root_dir = ROOT.gSystem.WorkingDirectory()
-        try:
-            ROOT.gSystem.ChangeDirectory(file_dir)
-            ROOT.gROOT.ProcessLine(f'.x "{filename}"')
-        finally:
-            ROOT.gSystem.ChangeDirectory(orig_root_dir)
+
+        # Declare the C++ code in Cling, then call the entry function by name
+        ok = ROOT.gInterpreter.Declare(code)
+        if not ok:
+            raise PlotError("Macro compilation failed — check the terminal for errors.")
+
+        func = getattr(ROOT, funcname, None)
+        if func is None:
+            raise PlotError(
+                f"Macro loaded but entry function '{funcname}' not found. "
+                "Make sure the function name matches the file name."
+            )
+        func()
     except PlotError:
         raise
     except Exception as exc:
