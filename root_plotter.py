@@ -1062,14 +1062,14 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
         file_dir = os.path.dirname(abs_path)
         filename = os.path.basename(abs_path)
         n_before = ROOT.gROOT.GetListOfCanvases().GetSize()
-        # chdir to the file's directory so ROOT's .x sees only the (space-free)
-        # filename — ROOT cannot handle spaces in the path given to .x
-        orig_dir = os.getcwd()
+        # ROOT's .x cannot handle spaces in paths. Use gSystem.ChangeDirectory()
+        # (ROOT's own cwd, not the OS cwd) so .x sees only the space-free filename.
+        orig_root_dir = ROOT.gSystem.WorkingDirectory()
         try:
-            os.chdir(file_dir)
+            ROOT.gSystem.ChangeDirectory(file_dir)
             ROOT.gROOT.ProcessLine(f'.x "{filename}"')
         finally:
-            os.chdir(orig_dir)
+            ROOT.gSystem.ChangeDirectory(orig_root_dir)
     except PlotError:
         raise
     except Exception as exc:
