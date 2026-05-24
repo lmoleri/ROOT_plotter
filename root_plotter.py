@@ -1058,10 +1058,20 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
     warnings_list: List[str] = []
 
     try:
-        escaped = path.replace('"', '\\"')
+        abs_path = os.path.abspath(path)
+        file_dir = os.path.dirname(abs_path)
+        filename = os.path.basename(abs_path)
         n_before = ROOT.gROOT.GetListOfCanvases().GetSize()
-        # Do NOT suppress output here — Cling compilation/runtime errors must surface
-        ROOT.gROOT.ProcessLine(f'.x "{escaped}"')
+        # chdir to the file's directory so ROOT's .x sees only the (space-free)
+        # filename — ROOT cannot handle spaces in the path given to .x
+        orig_dir = os.getcwd()
+        try:
+            os.chdir(file_dir)
+            ROOT.gROOT.ProcessLine(f'.x "{filename}"')
+        finally:
+            os.chdir(orig_dir)
+    except PlotError:
+        raise
     except Exception as exc:
         raise PlotError(f"Failed to execute macro: {exc}") from exc
 
