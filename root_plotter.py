@@ -1057,17 +1057,32 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
     """Execute a ROOT C macro, inspect its canvas, and return a reconstructed PlotConfig."""
     warnings_list: List[str] = []
 
-    with _suppress_root_output():
-        try:
-            escaped = path.replace('"', '\\"')
-            ROOT.gROOT.ProcessLine(f'.x "{escaped}"')
-        except Exception as exc:
-            raise PlotError(f"Failed to execute macro: {exc}") from exc
+    try:
+        escaped = path.replace('"', '\\"')
+        n_before = ROOT.gROOT.GetListOfCanvases().GetSize()
+        # Do NOT suppress output here — Cling compilation/runtime errors must surface
+        ROOT.gROOT.ProcessLine(f'.x "{escaped}"')
+    except Exception as exc:
+        raise PlotError(f"Failed to execute macro: {exc}") from exc
 
     clist = ROOT.gROOT.GetListOfCanvases()
-    if clist.GetSize() == 0:
-        raise PlotError("Macro did not create a TCanvas.")
-    canvas = clist.At(clist.GetSize() - 1)
+    n_after = clist.GetSize()
+
+    canvas = None
+    if n_after > n_before:
+        # At least one new canvas was created — take the last one
+        canvas = clist.At(n_after - 1)
+    else:
+        # Fallback: look for a canvas named "c" (used by all macros we generate)
+        obj = ROOT.gROOT.FindObject("c")
+        if obj and obj.InheritsFrom("TCanvas"):
+            canvas = obj
+
+    if canvas is None:
+        raise PlotError(
+            "Macro did not create a TCanvas. "
+            "Check the terminal for any compilation errors."
+        )
 
     config = PlotConfig()
     config.log_x = bool(canvas.GetLogx())
