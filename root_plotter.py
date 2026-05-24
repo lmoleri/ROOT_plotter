@@ -19,7 +19,7 @@ import ROOT
 ROOT.gROOT.SetBatch(True)
 ROOT.gROOT.ProcessLine("gErrorIgnoreLevel = kWarning;")
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -1729,6 +1729,14 @@ class PlotSettingsPanel(QScrollArea):
             series=series,
             th2f_draw_option=self.th2f_option_combo.currentText(),
         )
+
+    # Override size hints so the QScrollArea never forces the window to widen
+    # when series widgets with large minimum-width hints are added.
+    def sizeHint(self) -> QSize:
+        return QSize(370, super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(250, super().minimumSizeHint().height())
 
 
 # ---------------------------------------------------------------------------
