@@ -39,6 +39,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStackedWidget,
@@ -1792,6 +1793,8 @@ class PlotTab(QWidget):
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #888; font-style: italic; font-size: 12px;")
+        self.status_label.setMinimumWidth(0)   # prevent long warning text from growing the window
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         toolbar.addWidget(self.update_btn)
         toolbar.addWidget(self.export_btn)
