@@ -390,12 +390,14 @@ def _get_3col_data(series: SeriesData) -> List[Tuple[float, float, float]]:
 
 def _build_legend(items: list, mode: str) -> ROOT.TLegend:
     n = len(items)
-    y1 = max(0.60, 0.92 - n * 0.07)
-    leg = ROOT.TLegend(0.65, y1, 0.92, 0.92)
+    x1, x2, y2 = 0.65, 0.92, 0.92
+    y1 = max(0.60, y2 - n * 0.07)
+    leg = ROOT.TLegend(x1, y1, x2, y2)
     leg.SetBorderSize(0)
     leg.SetFillStyle(0)
     leg.SetTextFont(42)
     leg.SetTextSize(0.038)
+    leg.SetMargin(0.2)          # fixed marker-column fraction — prevents width growth
     for obj, series in items:
         if mode == "h":
             entry_style = "f" if series.fill_style > 0 else "l"
