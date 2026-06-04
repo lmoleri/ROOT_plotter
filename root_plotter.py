@@ -1781,6 +1781,8 @@ class PlotSettingsPanel(QScrollArea):
 class PlotTab(QWidget):
     """One plot tab: settings sidebar + preview image."""
 
+    tab_name_changed = pyqtSignal(str)   # emitted with the new tab label after a macro is loaded
+
     def __init__(self, tab_index: int, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._tab_index = tab_index
@@ -1984,6 +1986,7 @@ class PlotTab(QWidget):
         try:
             config, warnings = load_macro(path)
             self._remember(path)
+            self.tab_name_changed.emit(self._last_stem)
             self.settings.apply_config(config)
             if warnings:
                 self.status_label.setStyleSheet(
@@ -2056,9 +2059,15 @@ class RootPlotterApp(QMainWindow):
         self._tab_counter += 1
         tab = PlotTab(self._tab_counter, self)
         idx = self.tab_widget.addTab(tab, f"Plot {self._tab_counter}")
+        tab.tab_name_changed.connect(lambda name, t=tab: self._rename_tab(t, name))
         self.tab_widget.setCurrentIndex(idx)
         self._tabs.append(tab)
         self._update_close_visibility()
+
+    def _rename_tab(self, tab: "PlotTab", name: str) -> None:
+        idx = self.tab_widget.indexOf(tab)
+        if idx >= 0:
+            self.tab_widget.setTabText(idx, name)
 
     def _close_tab(self, index: int) -> None:
         if self.tab_widget.count() <= 1:
