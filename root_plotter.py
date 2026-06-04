@@ -1785,6 +1785,8 @@ class PlotTab(QWidget):
         super().__init__(parent)
         self._tab_index = tab_index
         self._temp_png: Optional[str] = None
+        self._last_dir: str = ""                           # remembered across all file dialogs
+        self._last_stem: str = f"plot_{tab_index}"        # filename stem (no extension)
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -1908,11 +1910,19 @@ class PlotTab(QWidget):
             )
             self.status_label.setText(f"Unexpected error: {exc}")
 
+    def _default_path(self, ext: str) -> str:
+        """Build a default save/load path from the remembered directory and stem."""
+        return os.path.join(self._last_dir, self._last_stem + ext)
+
+    def _remember(self, path: str) -> None:
+        """Store directory and stem from a path that was just used."""
+        self._last_dir = os.path.dirname(os.path.abspath(path))
+        self._last_stem = os.path.splitext(os.path.basename(path))[0]
+
     def _export_pdf(self) -> None:
         config = self.settings.get_config()
-        default_name = f"plot_{self._tab_index}.pdf"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export PDF", default_name, "PDF Files (*.pdf);;All Files (*)"
+            self, "Export PDF", self._default_path(".pdf"), "PDF Files (*.pdf);;All Files (*)"
         )
         if not path:
             return
@@ -1920,6 +1930,7 @@ class PlotTab(QWidget):
             path += ".pdf"
         try:
             export_pdf(config, path)
+            self._remember(path)
             self.status_label.setText(f"Saved: {os.path.basename(path)}")
         except PlotError as exc:
             QMessageBox.warning(self, "Export Failed", str(exc))
@@ -1928,9 +1939,8 @@ class PlotTab(QWidget):
 
     def _export_macro(self) -> None:
         config = self.settings.get_config()
-        default_name = f"plot_{self._tab_index}.C"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export C Macro", default_name, "C Macros (*.C);;All Files (*)"
+            self, "Export C Macro", self._default_path(".C"), "C Macros (*.C);;All Files (*)"
         )
         if not path:
             return
@@ -1938,6 +1948,7 @@ class PlotTab(QWidget):
             path += ".C"
         try:
             export_macro(config, path)
+            self._remember(path)
             self.status_label.setStyleSheet("color: #888; font-style: italic; font-size: 12px;")
             self.status_label.setText(f"Saved: {os.path.basename(path)}")
         except PlotError as exc:
@@ -1947,9 +1958,8 @@ class PlotTab(QWidget):
 
     def _export_root_file(self) -> None:
         config = self.settings.get_config()
-        default_name = f"plot_{self._tab_index}.root"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export ROOT File", default_name, "ROOT Files (*.root);;All Files (*)"
+            self, "Export ROOT File", self._default_path(".root"), "ROOT Files (*.root);;All Files (*)"
         )
         if not path:
             return
@@ -1957,6 +1967,7 @@ class PlotTab(QWidget):
             path += ".root"
         try:
             export_root(config, path)
+            self._remember(path)
             self.status_label.setStyleSheet("color: #888; font-style: italic; font-size: 12px;")
             self.status_label.setText(f"Saved: {os.path.basename(path)}")
         except PlotError as exc:
@@ -1966,12 +1977,13 @@ class PlotTab(QWidget):
 
     def _load_macro_action(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load C Macro", "", "C Macros (*.C *.c *.cxx);;All Files (*)"
+            self, "Load C Macro", self._last_dir, "C Macros (*.C *.c *.cxx);;All Files (*)"
         )
         if not path:
             return
         try:
             config, warnings = load_macro(path)
+            self._remember(path)
             self.settings.apply_config(config)
             if warnings:
                 self.status_label.setStyleSheet(
