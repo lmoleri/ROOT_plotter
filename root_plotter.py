@@ -1079,14 +1079,24 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
         with open(abs_path, "r") as fh:
             code = fh.read()
 
+        # Rename the entry function with a unique suffix before declaring so that
+        # loading the same macro more than once doesn't cause a Cling redefinition
+        # error (gInterpreter.Declare adds symbols permanently to the interpreter).
+        unique_funcname = f"{funcname}_{uuid.uuid4().hex[:8]}"
+        code_patched = re.sub(
+            r"\bvoid\s+" + re.escape(funcname) + r"\b",
+            f"void {unique_funcname}",
+            code,
+            count=1,
+        )
+
         n_before = ROOT.gROOT.GetListOfCanvases().GetSize()
 
-        # Declare the C++ code in Cling, then call the entry function by name
-        ok = ROOT.gInterpreter.Declare(code)
+        ok = ROOT.gInterpreter.Declare(code_patched)
         if not ok:
             raise PlotError("Macro compilation failed — check the terminal for errors.")
 
-        func = getattr(ROOT, funcname, None)
+        func = getattr(ROOT, unique_funcname, None)
         if func is None:
             raise PlotError(
                 f"Macro loaded but entry function '{funcname}' not found. "
