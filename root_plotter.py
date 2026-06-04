@@ -136,6 +136,8 @@ class PlotConfig:
     log_x: bool = False
     log_y: bool = False
     log_z: bool = False
+    grid_x: bool = False
+    grid_y: bool = False
     show_legend: bool = True
     latex_text: str = ""
     latex_x: float = 0.13
@@ -648,6 +650,10 @@ def _render_to_canvas(config: PlotConfig, uid: str) -> Tuple[ROOT.TCanvas, list,
         canvas.SetLogy(1)
     if config.log_z and config.plot_type.startswith("TH2F"):
         canvas.SetLogz(1)
+    if config.grid_x:
+        canvas.SetGridx(1)
+    if config.grid_y:
+        canvas.SetGridy(1)
 
     canvas.Modified()
     canvas.Update()
@@ -897,6 +903,10 @@ def export_macro(config: PlotConfig, output_path: str) -> None:
         L.append("  c->SetLogy();")
     if config.log_z and config.plot_type.startswith("TH2F"):
         L.append("  c->SetLogz();")
+    if config.grid_x:
+        L.append("  c->SetGridx();")
+    if config.grid_y:
+        L.append("  c->SetGridy();")
 
     if config.latex_text.strip():
         lx, ly = config.latex_x, config.latex_y
@@ -1536,7 +1546,17 @@ class PlotSettingsPanel(QScrollArea):
         for cb in (self.logx_cb, self.logy_cb, self.logz_cb):
             cb.toggled.connect(self.config_changed)
             row1.addWidget(cb)
+        row1.addStretch()
         lay.addLayout(row1)
+
+        row_grid = QHBoxLayout()
+        self.gridx_cb = QCheckBox("Grid X")
+        self.gridy_cb = QCheckBox("Grid Y")
+        for cb in (self.gridx_cb, self.gridy_cb):
+            cb.toggled.connect(self.config_changed)
+            row_grid.addWidget(cb)
+        row_grid.addStretch()
+        lay.addLayout(row_grid)
 
         row2 = QHBoxLayout()
         self.legend_cb = QCheckBox("Show Legend")
@@ -1660,6 +1680,8 @@ class PlotSettingsPanel(QScrollArea):
             self.logx_cb.setChecked(config.log_x)
             self.logy_cb.setChecked(config.log_y)
             self.logz_cb.setChecked(config.log_z)
+            self.gridx_cb.setChecked(config.grid_x)
+            self.gridy_cb.setChecked(config.grid_y)
             self.legend_cb.setChecked(config.show_legend)
             self.latex_edit.setText(config.latex_text)
             self.latex_x_spin.setValue(config.latex_x)
@@ -1723,6 +1745,8 @@ class PlotSettingsPanel(QScrollArea):
             log_x=self.logx_cb.isChecked(),
             log_y=self.logy_cb.isChecked(),
             log_z=self.logz_cb.isChecked(),
+            grid_x=self.gridx_cb.isChecked(),
+            grid_y=self.gridy_cb.isChecked(),
             show_legend=self.legend_cb.isChecked(),
             latex_text=self.latex_edit.text(),
             latex_x=self.latex_x_spin.value(),
