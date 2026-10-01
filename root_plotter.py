@@ -354,7 +354,37 @@ def _suppress_root_output():
 
 def _c_esc(s: str) -> str:
     """Escape a Python string for embedding in a C double-quoted literal."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
+
+
+def _fix_multiline_strings(code: str) -> str:
+    """Replace literal newlines inside C string literals with the \\n escape sequence.
+
+    Handles already-exported .C files that accidentally contain a raw newline
+    inside a string (e.g. mg->SetTitle("...\n...")).
+    """
+    result: list = []
+    in_string = False
+    i = 0
+    while i < len(code):
+        c = code[i]
+        if c == "\\" and in_string:
+            result.append(c)
+            i += 1
+            if i < len(code):
+                result.append(code[i])
+                i += 1
+        elif c == '"':
+            in_string = not in_string
+            result.append(c)
+            i += 1
+        elif c == "\n" and in_string:
+            result.append("\\n")
+            i += 1
+        else:
+            result.append(c)
+            i += 1
+    return "".join(result)
 
 
 def _color_to_hex(color_index: int) -> str:
@@ -1089,6 +1119,8 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
             code,
             count=1,
         )
+
+        code_patched = _fix_multiline_strings(code_patched)
 
         n_before = ROOT.gROOT.GetListOfCanvases().GetSize()
 
