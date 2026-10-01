@@ -101,6 +101,10 @@ TGRAPH_DRAW_STYLES: List[Tuple[str, str]] = [
 
 TH2F_DRAW_OPTIONS: List[str] = ["COLZ", "LEGO", "SURF1", "SURF2", "CONT4Z"]
 
+FIT_FUNCTIONS: List[str] = [
+    "gaus", "expo", "pol0", "pol1", "pol2", "pol3", "landau", "Custom...",
+]
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -119,6 +123,10 @@ class SeriesData:
     line_width: int = 2
     marker_size: float = 1.2
     fill_style: int = 0
+    fit_enabled:  bool  = False
+    fit_function: str   = "gaus"
+    fit_x_min:    float = 0.0
+    fit_x_max:    float = 0.0
 
 
 @dataclass
@@ -394,6 +402,19 @@ def _fix_multiline_strings(code: str) -> str:
     return "".join(result)
 
 
+def _format_fit_result(tf1) -> str:
+    """Return a human-readable summary of a fitted TF1 (chi2/ndf + parameters)."""
+    chi2 = tf1.GetChisquare()
+    ndf  = tf1.GetNDF()
+    lines = [f"χ²/ndf = {chi2:.3g} / {ndf}"]
+    for i in range(tf1.GetNpar()):
+        lines.append(
+            f"  {tf1.GetParName(i)} = {tf1.GetParameter(i):.4g}"
+            f" ± {tf1.GetParError(i):.4g}"
+        )
+    return "\n".join(lines)
+
+
 def _color_to_hex(color_index: int) -> str:
     """Convert a ROOT color index to '#rrggbb'."""
     tc = ROOT.gROOT.GetColor(int(color_index))
@@ -467,10 +488,12 @@ def _add_latex_overlay(drawn: list, config: PlotConfig) -> None:
     drawn.append(pave)
 
 
-def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list, List[str]]:
+def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list, List[str], dict]:
     drawn: list = []
     hists: list = []
+    hist_idxs: list = []
     warnings: List[str] = []
+    fit_results: dict = {}
 
     for i, series in enumerate(config.series):
         try:
@@ -504,6 +527,7 @@ def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list
             h.SetFillStyle(series.fill_style)
 
         hists.append((h, series))
+        hist_idxs.append(i)
 
     if not hists:
         raise PlotError("No valid data to plot.")
@@ -525,6 +549,24 @@ def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list
         h.Draw(f"{s.draw_style} SAME")
         drawn.append(h)
 
+    for orig_i, (h, series) in zip(hist_idxs, hists):
+        if not series.fit_enabled:
+            continue
+        try:
+            use_range = (series.fit_x_min != series.fit_x_max)
+            x_lo = series.fit_x_min if use_range else h.GetXaxis().GetXmin()
+            x_hi = series.fit_x_max if use_range else h.GetXaxis().GetXmax()
+            tf1 = ROOT.TF1(f"fitf_{uid}_{orig_i}", series.fit_function, x_lo, x_hi)
+            tf1.SetLineColor(series.color_index)
+            tf1.SetLineStyle(2)
+            tf1.SetLineWidth(series.line_width + 1)
+            h.Fit(tf1, "QNR" if use_range else "QN")
+            tf1.Draw("SAME")
+            drawn.append(tf1)
+            fit_results[orig_i] = _format_fit_result(tf1)
+        except Exception as exc:
+            warnings.append(f"'{series.name}' fit failed: {exc}")
+
     if config.show_legend:
         leg = _build_legend(hists, mode="h", config=config)
         leg.Draw()
@@ -533,15 +575,17 @@ def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list
     _add_latex_overlay(drawn, config)
     canvas.Modified()
     canvas.Update()
-    return drawn, warnings
+    return drawn, warnings, fit_results
 
 
-def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list, List[str]]:
+def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list, List[str], dict]:
     drawn: list = []
     mg = ROOT.TMultiGraph()
     mg.SetTitle(f"{config.title};{config.x_title};{config.y_title}")
     graphs: list = []
+    graph_idxs: list = []
     warnings: List[str] = []
+    fit_results: dict = {}
 
     for i, series in enumerate(config.series):
         try:
@@ -594,6 +638,7 @@ def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[li
         ROOT.SetOwnership(g, False)
         mg.Add(g, series.draw_style)
         graphs.append((g, series))
+        graph_idxs.append(i)
 
     if not graphs:
         raise PlotError("No valid data to plot.")
@@ -616,6 +661,24 @@ def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[li
 
     drawn.append(mg)
 
+    for orig_i, (g, series) in zip(graph_idxs, graphs):
+        if not series.fit_enabled:
+            continue
+        try:
+            use_range = (series.fit_x_min != series.fit_x_max)
+            x_lo = series.fit_x_min if use_range else g.GetXmin()
+            x_hi = series.fit_x_max if use_range else g.GetXmax()
+            tf1 = ROOT.TF1(f"fitf_{uid}_{orig_i}", series.fit_function, x_lo, x_hi)
+            tf1.SetLineColor(series.color_index)
+            tf1.SetLineStyle(2)
+            tf1.SetLineWidth(series.line_width + 1)
+            g.Fit(tf1, "QNR" if use_range else "QN")
+            tf1.Draw("SAME")
+            drawn.append(tf1)
+            fit_results[orig_i] = _format_fit_result(tf1)
+        except Exception as exc:
+            warnings.append(f"'{series.name}' fit failed: {exc}")
+
     if config.show_legend:
         leg = _build_legend(graphs, mode="g", config=config)
         leg.Draw()
@@ -624,10 +687,10 @@ def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[li
     _add_latex_overlay(drawn, config)
     canvas.Modified()
     canvas.Update()
-    return drawn, warnings
+    return drawn, warnings, fit_results
 
 
-def _draw_th2f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list, List[str]]:
+def _draw_th2f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list, List[str], dict]:
     drawn: list = []
     series = config.series[0]
 
@@ -674,19 +737,19 @@ def _draw_th2f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list
     _add_latex_overlay(drawn, config)
     canvas.Modified()
     canvas.Update()
-    return drawn, []
+    return drawn, [], {}
 
 
-def _render_to_canvas(config: PlotConfig, uid: str) -> Tuple[ROOT.TCanvas, list, List[str]]:
+def _render_to_canvas(config: PlotConfig, uid: str) -> Tuple[ROOT.TCanvas, list, List[str], dict]:
     canvas = ROOT.TCanvas(f"rp_canvas_{uid}", "", CANVAS_WIDTH, CANVAS_HEIGHT)
     canvas.SetLeftMargin(config.pad_left)
     canvas.SetBottomMargin(config.pad_bottom)
     if config.plot_type.startswith("TH1F"):
-        drawn, warnings = _draw_th1f(canvas, config, uid)
+        drawn, warnings, fit_results = _draw_th1f(canvas, config, uid)
     elif config.plot_type.startswith("TGraph"):
-        drawn, warnings = _draw_tgraph(canvas, config, uid)
+        drawn, warnings, fit_results = _draw_tgraph(canvas, config, uid)
     elif config.plot_type.startswith("TH2F"):
-        drawn, warnings = _draw_th2f(canvas, config, uid)
+        drawn, warnings, fit_results = _draw_th2f(canvas, config, uid)
     else:
         raise PlotError(f"Unknown plot type: {config.plot_type}")
 
@@ -703,23 +766,23 @@ def _render_to_canvas(config: PlotConfig, uid: str) -> Tuple[ROOT.TCanvas, list,
 
     canvas.Modified()
     canvas.Update()
-    return canvas, drawn, warnings
+    return canvas, drawn, warnings, fit_results
 
 
-def render_plot(config: PlotConfig) -> Tuple[str, List[str]]:
-    """Render config to a temp PNG. Returns (path, warnings). Caller must delete path."""
+def render_plot(config: PlotConfig) -> Tuple[str, List[str], dict]:
+    """Render config to a temp PNG. Returns (path, warnings, fit_results)."""
     uid = uuid.uuid4().hex[:8]
-    canvas, drawn, warnings = _render_to_canvas(config, uid)
+    canvas, drawn, warnings, fit_results = _render_to_canvas(config, uid)
     tmpf = tempfile.NamedTemporaryFile(suffix=".png", prefix="rootplot_", delete=False)
     tmpf.close()
     with _suppress_root_output():
         canvas.SaveAs(tmpf.name)
-    return tmpf.name, warnings
+    return tmpf.name, warnings, fit_results
 
 
 def export_pdf(config: PlotConfig, output_path: str) -> None:
     uid = uuid.uuid4().hex[:8]
-    canvas, drawn, _warnings = _render_to_canvas(config, uid)
+    canvas, drawn, _warnings, _fit = _render_to_canvas(config, uid)
     with _suppress_root_output():
         canvas.SaveAs(output_path)
     if not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
@@ -811,6 +874,22 @@ def _macro_th1f(L: list, config: PlotConfig) -> None:
             L.append(f"  {vn}->SetFillStyle({series.fill_style});")
         draw_opt = series.draw_style if not var_names else f"{series.draw_style} SAME"
         L.append(f'  {vn}->Draw("{draw_opt}");')
+        if series.fit_enabled:
+            use_range = (series.fit_x_min != series.fit_x_max)
+            f_lo = series.fit_x_min if use_range else xmin
+            f_hi = series.fit_x_max if use_range else xmax
+            opt = "QNR" if use_range else "QN"
+            fn = f"f_{i}"
+            L += [
+                f"  // Fit: {series.name}",
+                f'  TF1 *{fn} = new TF1("{fn}", "{_c_esc(series.fit_function)}",'
+                f" {f_lo:.6g}, {f_hi:.6g});",
+                f'  {fn}->SetLineColor(TColor::GetColor("{series.color_hex}"));',
+                f"  {fn}->SetLineStyle(2);",
+                f"  {fn}->SetLineWidth({series.line_width + 1});",
+                f'  {vn}->Fit({fn}, "{opt}");',
+                f'  {fn}->Draw("SAME");',
+            ]
         L.append("")
         var_names.append((vn, series))
 
@@ -830,6 +909,7 @@ def _macro_tgraph(L: list, config: PlotConfig) -> None:
     L.append("")
 
     var_names = []
+    fit_specs: list = []   # (vn, series, f_lo, f_hi, use_range)
     for i, series in enumerate(config.series):
         try:
             rows = _get_2col_data(series)
@@ -861,6 +941,14 @@ def _macro_tgraph(L: list, config: PlotConfig) -> None:
             "",
         ]
         var_names.append((vn, series))
+        if series.fit_enabled:
+            use_range = (series.fit_x_min != series.fit_x_max)
+            if use_range:
+                f_lo, f_hi = series.fit_x_min, series.fit_x_max
+            else:
+                xs = [x for x, _, _, _ in rows]
+                f_lo, f_hi = min(xs), max(xs)
+            fit_specs.append((vn, series, f_lo, f_hi, use_range))
 
     if not var_names:
         L.append("  // No valid series data")
@@ -873,6 +961,21 @@ def _macro_tgraph(L: list, config: PlotConfig) -> None:
         L.append(f"  mg->GetXaxis()->SetLimits({config.x_min:.6g}, {config.x_max:.6g});")
     if not (config.y_min == config.y_max == 0.0):
         L.append(f"  mg->GetYaxis()->SetRangeUser({config.y_min:.6g}, {config.y_max:.6g});")
+
+    for vn, series, f_lo, f_hi, use_range in fit_specs:
+        fn = f"f_{vn}"
+        opt = "QNR" if use_range else "QN"
+        L += [
+            f"  // Fit: {series.name}",
+            f'  TF1 *{fn} = new TF1("{fn}", "{_c_esc(series.fit_function)}",'
+            f" {f_lo:.6g}, {f_hi:.6g});",
+            f'  {fn}->SetLineColor(TColor::GetColor("{series.color_hex}"));',
+            f"  {fn}->SetLineStyle(2);",
+            f"  {fn}->SetLineWidth({series.line_width + 1});",
+            f'  {vn}->Fit({fn}, "{opt}");',
+            f'  {fn}->Draw("SAME");',
+            "",
+        ]
 
     if config.show_legend:
         _macro_legend(L, var_names, "g", config.legend_x, config.legend_y)
@@ -986,7 +1089,7 @@ def export_macro(config: PlotConfig, output_path: str) -> None:
 def export_root(config: PlotConfig, output_path: str) -> None:
     """Save ROOT objects and the styled canvas to a .root file."""
     uid = uuid.uuid4().hex[:8]
-    canvas, drawn, _warnings = _render_to_canvas(config, uid)
+    canvas, drawn, _warnings, _fit = _render_to_canvas(config, uid)
 
     with _suppress_root_output():
         tfile = ROOT.TFile.Open(output_path, "RECREATE")
@@ -1032,7 +1135,7 @@ def _introspect_th1f(prims: list, config: PlotConfig, warnings: list) -> None:
                 center = h.GetXaxis().GetBinCenter(b)
                 lines_data.append(f"{center:.6g}  {content:.6g}")
         color_idx = int(h.GetLineColor())
-        config.series.append(SeriesData(
+        sd = SeriesData(
             name=h.GetName() or f"Series {i + 1}",
             raw_text="\n".join(lines_data),
             color_index=color_idx,
@@ -1040,7 +1143,18 @@ def _introspect_th1f(prims: list, config: PlotConfig, warnings: list) -> None:
             line_width=int(h.GetLineWidth()),
             fill_style=int(h.GetFillStyle()),
             draw_style="HIST",
-        ))
+        )
+        flist = h.GetListOfFunctions()
+        if flist:
+            for j in range(flist.GetSize()):
+                f = flist.At(j)
+                if f and "TF1" in (f.ClassName() or ""):
+                    sd.fit_enabled  = True
+                    sd.fit_function = f.GetTitle()
+                    sd.fit_x_min    = float(f.GetXmin())
+                    sd.fit_x_max    = float(f.GetXmax())
+                    break
+        config.series.append(sd)
 
 
 def _introspect_tgraph(prims: list, config: PlotConfig, warnings: list) -> None:
@@ -1087,7 +1201,7 @@ def _introspect_tgraph(prims: list, config: PlotConfig, warnings: list) -> None:
             ey = g.GetEY()[j] if has_err else 0.0
             rows.append(f"{x:.6g}  {y:.6g}  {ex:.6g}  {ey:.6g}")
         color_idx = int(g.GetMarkerColor())
-        config.series.append(SeriesData(
+        sd = SeriesData(
             name=g.GetTitle() or f"Series {len(config.series) + 1}",
             raw_text="\n".join(rows),
             color_index=color_idx,
@@ -1096,7 +1210,18 @@ def _introspect_tgraph(prims: list, config: PlotConfig, warnings: list) -> None:
             marker_size=float(g.GetMarkerSize()),
             line_width=int(g.GetLineWidth()),
             draw_style=draw_style,
-        ))
+        )
+        flist = g.GetListOfFunctions()
+        if flist:
+            for j in range(flist.GetSize()):
+                f = flist.At(j)
+                if f and "TF1" in (f.ClassName() or ""):
+                    sd.fit_enabled  = True
+                    sd.fit_function = f.GetTitle()
+                    sd.fit_x_min    = float(f.GetXmin())
+                    sd.fit_x_max    = float(f.GetXmax())
+                    break
+        config.series.append(sd)
 
 
 def _introspect_th2f(prims: list, config: PlotConfig, warnings: list) -> None:
@@ -1515,6 +1640,59 @@ class SeriesWidget(QWidget):
         lw_row.addStretch()
         layout.addLayout(lw_row)
 
+        # Fit controls
+        fit_row_a = QHBoxLayout()
+        self.fit_cb = QCheckBox("Fit:")
+        self.fit_cb.toggled.connect(self._on_fit_toggled)
+        self.fit_cb.toggled.connect(self.changed)
+        fit_row_a.addWidget(self.fit_cb)
+        self.fit_func_combo = QComboBox()
+        for fn in FIT_FUNCTIONS:
+            self.fit_func_combo.addItem(fn)
+        self.fit_func_combo.currentIndexChanged.connect(self._on_fit_func_changed)
+        self.fit_func_combo.currentIndexChanged.connect(self.changed)
+        fit_row_a.addWidget(self.fit_func_combo)
+        self.fit_formula_edit = QLineEdit()
+        self.fit_formula_edit.setPlaceholderText("e.g. [0]*x+[1]")
+        self.fit_formula_edit.textChanged.connect(self.changed)
+        self.fit_formula_edit.setVisible(False)
+        fit_row_a.addWidget(self.fit_formula_edit, 1)
+        fit_row_a.addStretch()
+        layout.addLayout(fit_row_a)
+
+        fit_row_b = QHBoxLayout()
+        self._fit_range_label = QLabel("X range:")
+        fit_row_b.addWidget(self._fit_range_label)
+        self.fit_xmin_spin = QDoubleSpinBox()
+        self.fit_xmin_spin.setRange(-1e9, 1e9)
+        self.fit_xmin_spin.setDecimals(4)
+        self.fit_xmin_spin.setSingleStep(0.001)
+        self.fit_xmin_spin.setValue(0.0)
+        self.fit_xmin_spin.valueChanged.connect(self.changed)
+        fit_row_b.addWidget(self.fit_xmin_spin)
+        self._fit_range_to_lbl = QLabel("to")
+        fit_row_b.addWidget(self._fit_range_to_lbl)
+        self.fit_xmax_spin = QDoubleSpinBox()
+        self.fit_xmax_spin.setRange(-1e9, 1e9)
+        self.fit_xmax_spin.setDecimals(4)
+        self.fit_xmax_spin.setSingleStep(0.001)
+        self.fit_xmax_spin.setValue(0.0)
+        self.fit_xmax_spin.valueChanged.connect(self.changed)
+        fit_row_b.addWidget(self.fit_xmax_spin)
+        fit_row_b.addStretch()
+        self._fit_range_row = fit_row_b
+        layout.addLayout(fit_row_b)
+
+        self.fit_result_lbl = QLabel()
+        self.fit_result_lbl.setStyleSheet(
+            "font-family: monospace; font-size: 11px; color: #448844;"
+        )
+        self.fit_result_lbl.setWordWrap(True)
+        self.fit_result_lbl.hide()
+        layout.addWidget(self.fit_result_lbl)
+
+        self._update_fit_range_visibility()
+
         # Data input toggle
         input_toggle = QHBoxLayout()
         self.paste_radio = QRadioButton("Paste data")
@@ -1578,10 +1756,43 @@ class SeriesWidget(QWidget):
 
     def _refresh_visibility(self) -> None:
         is_graph = self._plot_type.startswith("TGraph")
+        is_th2f  = self._plot_type.startswith("TH2F")
         self._marker_label.setVisible(is_graph)
         self.marker_combo.setVisible(is_graph)
         self._ms_label.setVisible(is_graph)
         self.ms_spin.setVisible(is_graph)
+        # Fit controls only for TH1F and TGraph
+        fit_ok = not is_th2f
+        self.fit_cb.setVisible(fit_ok)
+        self.fit_func_combo.setVisible(fit_ok)
+        self.fit_formula_edit.setVisible(
+            fit_ok and self.fit_func_combo.currentText() == "Custom..."
+        )
+        if is_th2f:
+            self.fit_result_lbl.hide()
+        self._update_fit_range_visibility()
+
+    def _on_fit_toggled(self, checked: bool) -> None:
+        self._update_fit_range_visibility()
+        if not checked:
+            self.fit_result_lbl.hide()
+
+    def _on_fit_func_changed(self) -> None:
+        is_custom = self.fit_func_combo.currentText() == "Custom..."
+        is_th2f   = self._plot_type.startswith("TH2F")
+        self.fit_formula_edit.setVisible(is_custom and not is_th2f)
+
+    def _update_fit_range_visibility(self) -> None:
+        is_th2f = self._plot_type.startswith("TH2F")
+        show = self.fit_cb.isChecked() and not is_th2f
+        self._fit_range_label.setVisible(show)
+        self.fit_xmin_spin.setVisible(show)
+        self._fit_range_to_lbl.setVisible(show)
+        self.fit_xmax_spin.setVisible(show)
+
+    def set_fit_result(self, text: str) -> None:
+        self.fit_result_lbl.setText(text)
+        self.fit_result_lbl.show()
 
     def _toggle_input_mode(self) -> None:
         self.input_stack.setCurrentIndex(0 if self.paste_radio.isChecked() else 1)
@@ -1631,6 +1842,10 @@ class SeriesWidget(QWidget):
         marker_idx = self.marker_combo.currentIndex()
         marker_style = ROOT_MARKERS[marker_idx][1] if 0 <= marker_idx < len(ROOT_MARKERS) else ROOT.kFullCircle
 
+        fit_func_text = self.fit_func_combo.currentText()
+        if fit_func_text == "Custom...":
+            fit_func_text = self.fit_formula_edit.text().strip() or "gaus"
+
         return SeriesData(
             name=self.name_edit.text() or f"Series {self._index + 1}",
             raw_text=self.text_edit.toPlainText(),
@@ -1643,6 +1858,10 @@ class SeriesWidget(QWidget):
             line_width=self.lw_spin.value(),
             marker_size=self.ms_spin.value(),
             fill_style=fill_style,
+            fit_enabled=self.fit_cb.isChecked(),
+            fit_function=fit_func_text,
+            fit_x_min=self.fit_xmin_spin.value(),
+            fit_x_max=self.fit_xmax_spin.value(),
         )
 
 
@@ -1997,6 +2216,18 @@ class PlotSettingsPanel(QScrollArea):
                         break
                 sw.lw_spin.setValue(series.line_width)
                 sw.ms_spin.setValue(series.marker_size)
+                # Fit settings
+                sw.fit_cb.setChecked(series.fit_enabled)
+                func = series.fit_function
+                if func in FIT_FUNCTIONS and func != "Custom...":
+                    sw.fit_func_combo.setCurrentIndex(FIT_FUNCTIONS.index(func))
+                    sw.fit_formula_edit.setVisible(False)
+                else:
+                    sw.fit_func_combo.setCurrentIndex(FIT_FUNCTIONS.index("Custom..."))
+                    sw.fit_formula_edit.setText(func)
+                sw.fit_xmin_spin.setValue(series.fit_x_min)
+                sw.fit_xmax_spin.setValue(series.fit_x_max)
+                sw.fit_result_lbl.hide()
                 self._series_widgets.append(sw)
                 self._series_layout.addWidget(sw)
         finally:
@@ -2145,7 +2376,7 @@ class PlotTab(QWidget):
 
         self._delete_temp_png()
         try:
-            png_path, warnings = render_plot(config)
+            png_path, warnings, fit_results = render_plot(config)
             self._temp_png = png_path
             pm = QPixmap(png_path)
             if pm.isNull():
@@ -2157,6 +2388,10 @@ class PlotTab(QWidget):
                 self.preview.set_legend_ndc(lx, max(0.0, ly - n * 0.07), min(1.0, lx + 0.27), ly)
             else:
                 self.preview.set_legend_ndc(0, 0, 0, 0)
+            for fit_i, fit_text in fit_results.items():
+                sws = self.settings._series_widgets
+                if fit_i < len(sws):
+                    sws[fit_i].set_fit_result(fit_text)
             self.export_btn.setEnabled(True)
             self.export_c_btn.setEnabled(True)
             self.export_root_btn.setEnabled(True)
