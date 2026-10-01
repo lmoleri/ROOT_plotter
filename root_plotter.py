@@ -1030,9 +1030,16 @@ def _introspect_tgraph(prims: list, config: PlotConfig, warnings: list) -> None:
         config.title = parts[0] if parts else ""
         config.x_title = parts[1] if len(parts) > 1 else ""
         config.y_title = parts[2] if len(parts) > 2 else ""
-        gl = mg.GetListOfGraphs()
-        all_graphs = [gl.At(j) for j in range(gl.GetSize())]
+        it = ROOT.TIter(mg.GetListOfGraphs())
+        graph_opts: list = []
+        g = it.Next()
+        while g:
+            raw = (it.GetOption() or "").strip().upper()
+            graph_opts.append((g, "LP" if "L" in raw else "P"))
+            g = it.Next()
+        all_graphs = [go[0] for go in graph_opts]
     else:
+        graph_opts = [(g, "LP") for g in bare]
         all_graphs = bare
         if bare:
             parts = bare[0].GetTitle().split(";")
@@ -1040,7 +1047,7 @@ def _introspect_tgraph(prims: list, config: PlotConfig, warnings: list) -> None:
             config.x_title = parts[1] if len(parts) > 1 else ""
             config.y_title = parts[2] if len(parts) > 2 else ""
 
-    for g in all_graphs:
+    for g, draw_style in graph_opts:
         if not g:
             continue
         n = g.GetN()
@@ -1059,7 +1066,7 @@ def _introspect_tgraph(prims: list, config: PlotConfig, warnings: list) -> None:
             color_hex=_color_to_hex(color_idx),
             marker_style=int(g.GetMarkerStyle()),
             line_width=int(g.GetLineWidth()),
-            draw_style="LP",
+            draw_style=draw_style,
         ))
 
 
@@ -1165,6 +1172,8 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
     config.log_x = bool(canvas.GetLogx())
     config.log_y = bool(canvas.GetLogy())
     config.log_z = bool(canvas.GetLogz())
+    config.grid_x = bool(canvas.GetGridx())
+    config.grid_y = bool(canvas.GetGridy())
     config.series = []
 
     pl = canvas.GetListOfPrimitives()
@@ -1177,7 +1186,7 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
         cn = p.ClassName()
         if cn == "TLegend":
             config.show_legend = True
-        elif cn == "TPaveText":
+        elif cn == "TPaveText" and p.GetName() != "title":
             ll = p.GetListOfLines()
             if ll and ll.GetSize() > 0:
                 t = ll.At(0)
