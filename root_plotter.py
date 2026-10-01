@@ -1480,7 +1480,6 @@ class SeriesWidget(QWidget):
         self.lw_spin.setValue(2)
         self.lw_spin.valueChanged.connect(self.changed)
         lw_row.addWidget(self.lw_spin)
-        lw_row.addStretch()
         self._ms_label = QLabel("Marker size:")
         self.ms_spin = QDoubleSpinBox()
         self.ms_spin.setRange(0.1, 5.0)
@@ -1490,6 +1489,7 @@ class SeriesWidget(QWidget):
         self.ms_spin.valueChanged.connect(self.changed)
         lw_row.addWidget(self._ms_label)
         lw_row.addWidget(self.ms_spin)
+        lw_row.addStretch()
         layout.addLayout(lw_row)
 
         # Data input toggle
