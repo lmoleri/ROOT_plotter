@@ -138,6 +138,7 @@ class PlotConfig:
     z_title: str = ""
     n_bins_x: int = 50
     n_bins_y: int = 50
+    rebin_x:  int = 1
     x_min: float = 0.0
     x_max: float = 0.0
     y_min: float = 0.0
@@ -519,6 +520,8 @@ def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list
         h.SetDirectory(0)
         for v, w in values:
             h.Fill(v, w)
+        if config.rebin_x > 1:
+            h.Rebin(config.rebin_x)
 
         h.SetLineColor(series.color_index)
         h.SetLineWidth(series.line_width)
@@ -866,6 +869,10 @@ def _macro_th1f(L: list, config: PlotConfig) -> None:
             f" {nbins}, {xmin:.6g}, {xmax:.6g});",
             f"  {vn}->SetDirectory(0);",
             f"  for (int j = 0; j < N_{i}; j++) {vn}->Fill(vals_{i}[j], wgts_{i}[j]);",
+        ]
+        if config.rebin_x > 1:
+            L.append(f"  {vn}->Rebin({config.rebin_x});")
+        L += [
             f'  {vn}->SetLineColor(TColor::GetColor("{series.color_hex}"));',
             f"  {vn}->SetLineWidth({series.line_width});",
         ]
@@ -1948,6 +1955,15 @@ class PlotSettingsPanel(QScrollArea):
         self.nbins_x_spin.valueChanged.connect(self.config_changed)
         lay.addWidget(self.nbins_x_spin)
 
+        self._rebin_label = QLabel("Rebin:")
+        lay.addWidget(self._rebin_label)
+        self.rebin_x_spin = QSpinBox()
+        self.rebin_x_spin.setRange(1, 200)
+        self.rebin_x_spin.setValue(1)
+        self.rebin_x_spin.setToolTip("Merge this many adjacent bins (ROOT Rebin). 1 = no rebinning.")
+        self.rebin_x_spin.valueChanged.connect(self.config_changed)
+        lay.addWidget(self.rebin_x_spin)
+
         self._binsy_label = QLabel("Bins Y:")
         self._binsy_label.setVisible(False)
         lay.addWidget(self._binsy_label)
@@ -2118,6 +2134,9 @@ class PlotSettingsPanel(QScrollArea):
         self.th2f_option_combo.setVisible(is_th2f)
         self._binsy_label.setVisible(is_th2f)
         self.nbins_y_spin.setVisible(is_th2f)
+        # Rebin only for TH1F
+        self._rebin_label.setVisible(not is_th2f and not is_graph)
+        self.rebin_x_spin.setVisible(not is_th2f and not is_graph)
         # TH2F only makes sense with a single series
         self._add_series_btn.setEnabled(not is_th2f)
         self.legend_cb.setVisible(not is_th2f)
@@ -2159,6 +2178,7 @@ class PlotSettingsPanel(QScrollArea):
             self.y_title_edit.setText(config.y_title)
             self.z_title_edit.setText(config.z_title)
             self.nbins_x_spin.setValue(config.n_bins_x)
+            self.rebin_x_spin.setValue(config.rebin_x)
             self.nbins_y_spin.setValue(config.n_bins_y)
             self.xmin_spin.setValue(config.x_min)
             self.xmax_spin.setValue(config.x_max)
@@ -2244,6 +2264,7 @@ class PlotSettingsPanel(QScrollArea):
             z_title=self.z_title_edit.text(),
             n_bins_x=self.nbins_x_spin.value(),
             n_bins_y=self.nbins_y_spin.value(),
+            rebin_x=self.rebin_x_spin.value(),
             x_min=self.xmin_spin.value(),
             x_max=self.xmax_spin.value(),
             y_min=self.ymin_spin.value(),
