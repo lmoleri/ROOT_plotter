@@ -1104,6 +1104,8 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
         abs_path = os.path.abspath(path)
         filename = os.path.basename(abs_path)
         funcname = re.sub(r"\W+", "_", os.path.splitext(filename)[0])
+        if funcname and funcname[0].isdigit():
+            funcname = "_" + funcname
 
         # Read with Python to avoid ROOT's path resolver (which chokes on spaces)
         with open(abs_path, "r") as fh:
