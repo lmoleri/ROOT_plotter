@@ -19,8 +19,8 @@ import ROOT
 ROOT.gROOT.SetBatch(True)
 ROOT.gROOT.ProcessLine("gErrorIgnoreLevel = kWarning;")
 
-from PyQt5.QtCore import Qt, QSize, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPixmap
+from PyQt5.QtCore import Qt, QPointF, QRectF, QSize, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -139,6 +139,8 @@ class PlotConfig:
     grid_x: bool = False
     grid_y: bool = False
     show_legend: bool = True
+    legend_x: float = 0.65   # NDC x1 (left edge)
+    legend_y: float = 0.92   # NDC y2 (top edge)
     latex_text: str = ""
     latex_x: float = 0.13
     latex_y: float = 0.88
@@ -421,10 +423,12 @@ def _get_3col_data(series: SeriesData) -> List[Tuple[float, float, float]]:
     return parse_3col_values(series.raw_text)
 
 
-def _build_legend(items: list, mode: str) -> ROOT.TLegend:
+def _build_legend(items: list, mode: str, config: "PlotConfig") -> ROOT.TLegend:
     n = len(items)
-    x1, x2, y2 = 0.65, 0.92, 0.92
-    y1 = max(0.60, y2 - n * 0.07)
+    x1 = config.legend_x
+    y2 = config.legend_y
+    x2 = min(1.0, x1 + 0.27)
+    y1 = max(0.0, y2 - n * 0.07)
     leg = ROOT.TLegend(x1, y1, x2, y2)
     leg.SetBorderSize(0)
     leg.SetFillStyle(0)
@@ -515,7 +519,7 @@ def _draw_th1f(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[list
         drawn.append(h)
 
     if config.show_legend:
-        leg = _build_legend(hists, mode="h")
+        leg = _build_legend(hists, mode="h", config=config)
         leg.Draw()
         drawn.append(leg)
 
@@ -603,7 +607,7 @@ def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[li
     drawn.append(mg)
 
     if config.show_legend:
-        leg = _build_legend(graphs, mode="g")
+        leg = _build_legend(graphs, mode="g", config=config)
         leg.Draw()
         drawn.append(leg)
 
@@ -732,10 +736,12 @@ def _macro_gstyle(L: list) -> None:
     ]
 
 
-def _macro_legend(L: list, var_names: list, mode: str) -> None:
+def _macro_legend(L: list, var_names: list, mode: str, legend_x: float = 0.65, legend_y: float = 0.92) -> None:
     n = len(var_names)
-    y1 = max(0.60, 0.92 - n * 0.07)
-    L.append(f"  TLegend *leg = new TLegend(0.65, {y1:.4f}, 0.92, 0.92);")
+    x1, y2 = legend_x, legend_y
+    x2 = min(1.0, x1 + 0.27)
+    y1 = max(0.0, y2 - n * 0.07)
+    L.append(f"  TLegend *leg = new TLegend({x1:.4f}, {y1:.4f}, {x2:.4f}, {y2:.4f});")
     L.append("  leg->SetBorderSize(0); leg->SetFillStyle(0);")
     L.append("  leg->SetTextFont(42); leg->SetTextSize(0.038);")
     for vname, series in var_names:
@@ -800,7 +806,7 @@ def _macro_th1f(L: list, config: PlotConfig) -> None:
         L.append(f"  {var_names[0][0]}->GetYaxis()->SetRangeUser({config.y_min:.6g}, {config.y_max:.6g});")
 
     if config.show_legend:
-        _macro_legend(L, var_names, "h")
+        _macro_legend(L, var_names, "h", config.legend_x, config.legend_y)
 
 
 def _macro_tgraph(L: list, config: PlotConfig) -> None:
@@ -852,7 +858,7 @@ def _macro_tgraph(L: list, config: PlotConfig) -> None:
         L.append(f"  mg->GetYaxis()->SetRangeUser({config.y_min:.6g}, {config.y_max:.6g});")
 
     if config.show_legend:
-        _macro_legend(L, var_names, "g")
+        _macro_legend(L, var_names, "g", config.legend_x, config.legend_y)
 
 
 def _macro_th2f(L: list, config: PlotConfig) -> None:
@@ -1186,6 +1192,8 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
         cn = p.ClassName()
         if cn == "TLegend":
             config.show_legend = True
+            config.legend_x = float(p.GetX1NDC())
+            config.legend_y = float(p.GetY2NDC())
         elif cn == "TPaveText" and p.GetName() != "title":
             ll = p.GetListOfLines()
             if ll and ll.GetSize() > 0:
@@ -1226,7 +1234,14 @@ def load_macro(path: str) -> Tuple[PlotConfig, List[str]]:
 # ---------------------------------------------------------------------------
 
 class ScalableImageLabel(QLabel):
-    """QLabel that scales its pixmap to fill available space."""
+    """QLabel that scales its pixmap to fill available space.
+
+    When a legend rect is registered via set_legend_ndc(), the user can
+    click-drag the legend to a new position; legend_moved is emitted on
+    mouse release with the new (x1, y2) NDC coordinates.
+    """
+
+    legend_moved = pyqtSignal(float, float)   # new (legend_x, legend_y) NDC
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1235,6 +1250,15 @@ class ScalableImageLabel(QLabel):
         self.setMinimumSize(300, 200)
         self._show_placeholder()
         self.setStyleSheet("background: #1e1e1e;")
+        self.setMouseTracking(True)
+
+        # Legend drag state (all in NDC: y=0 bottom, y=1 top)
+        self._legend_ndc: Optional[QRectF] = None   # x1, y1(bottom), w, h
+        self._drag_active = False
+        self._drag_start_widget: Optional[QPointF] = None
+        self._drag_ndc_anchor: Optional[tuple] = None   # (legend_x, legend_y) at press
+        self._drag_offset_ndc: Optional[tuple] = None   # cursor offset inside legend
+        self._drag_current_ndc: Optional[tuple] = None  # live (x1, y2) during drag
 
     def _show_placeholder(self) -> None:
         self.setText("No plot yet.\nConfigure settings and click Update Plot.")
@@ -1249,8 +1273,16 @@ class ScalableImageLabel(QLabel):
 
     def clear_plot(self) -> None:
         self._source_pixmap = None
+        self._legend_ndc = None
         self.setPixmap(QPixmap())
         self._show_placeholder()
+
+    def set_legend_ndc(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        """Register the current legend bounding box in NDC (y=0 bottom)."""
+        if x1 == x2 == y1 == y2 == 0:
+            self._legend_ndc = None
+        else:
+            self._legend_ndc = QRectF(x1, y1, x2 - x1, y2 - y1)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1266,6 +1298,116 @@ class ScalableImageLabel(QLabel):
                 Qt.SmoothTransformation,
             )
             self.setPixmap(scaled)
+
+    # --- coordinate helpers -------------------------------------------------
+
+    def _image_rect(self) -> Optional[tuple]:
+        """Return (ox, oy, pw, ph) — offset and size of the displayed pixmap."""
+        pm = self.pixmap()
+        if pm is None or pm.isNull():
+            return None
+        pw, ph = pm.width(), pm.height()
+        ox = (self.width() - pw) / 2
+        oy = (self.height() - ph) / 2
+        return ox, oy, pw, ph
+
+    def _widget_to_ndc(self, pt: QPointF):
+        ir = self._image_rect()
+        if ir is None:
+            return None, None
+        ox, oy, pw, ph = ir
+        rx = (pt.x() - ox) / pw
+        ry = 1.0 - (pt.y() - oy) / ph   # flip y: ROOT y=0 is bottom
+        return rx, ry
+
+    def _ndc_to_widget(self, nx: float, ny: float) -> QPointF:
+        ir = self._image_rect()
+        if ir is None:
+            return QPointF()
+        ox, oy, pw, ph = ir
+        return QPointF(ox + nx * pw, oy + (1.0 - ny) * ph)
+
+    def _ndc_rect_to_widget(self, r: QRectF) -> "QRectF":
+        """Convert NDC QRectF (y1=bottom) to widget-pixel QRectF (y1=top)."""
+        tl = self._ndc_to_widget(r.x(), r.y() + r.height())  # NDC top = y2
+        br = self._ndc_to_widget(r.x() + r.width(), r.y())   # NDC bottom = y1
+        return QRectF(tl, br)
+
+    def _over_legend(self, pt: QPointF) -> bool:
+        if self._legend_ndc is None:
+            return False
+        nx, ny = self._widget_to_ndc(pt)
+        if nx is None:
+            return False
+        return self._legend_ndc.contains(QPointF(nx, ny))
+
+    # --- mouse events -------------------------------------------------------
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._over_legend(event.pos()):
+            nx, ny = self._widget_to_ndc(QPointF(event.pos()))
+            self._drag_active = True
+            self._drag_start_widget = QPointF(event.pos())
+            r = self._legend_ndc
+            # offset from cursor to legend top-left in NDC
+            self._drag_offset_ndc = (nx - r.x(), ny - (r.y() + r.height()))
+            self._drag_ndc_anchor = (r.x(), r.y() + r.height())
+            self._drag_current_ndc = self._drag_ndc_anchor
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        pt = QPointF(event.pos())
+        if self._drag_active:
+            nx, ny = self._widget_to_ndc(pt)
+            if nx is not None:
+                off_x, off_y = self._drag_offset_ndc
+                new_x = nx - off_x
+                new_y = ny - off_y
+                self._drag_current_ndc = (new_x, new_y)
+                self.update()
+            event.accept()
+        else:
+            if self._over_legend(pt):
+                self.setCursor(Qt.SizeAllCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._drag_active and event.button() == Qt.LeftButton:
+            if self._drag_current_ndc:
+                self.legend_moved.emit(*self._drag_current_ndc)
+            self._drag_active = False
+            self._drag_start_widget = None
+            self._drag_current_ndc = None
+            self._drag_ndc_anchor = None
+            self._drag_offset_ndc = None
+            self.update()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    # --- paint overlay during drag ------------------------------------------
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._drag_active or self._drag_current_ndc is None or self._legend_ndc is None:
+            return
+        new_x, new_y = self._drag_current_ndc
+        r = self._legend_ndc
+        drag_rect_ndc = QRectF(new_x, new_y - r.height(), r.width(), r.height())
+        w_rect = self._ndc_rect_to_widget(drag_rect_ndc)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.fillRect(w_rect, QColor(255, 255, 255, 40))
+        pen = QPen(QColor(255, 255, 255, 200))
+        pen.setWidth(1)
+        pen.setStyle(Qt.DashLine)
+        painter.setPen(pen)
+        painter.drawRect(w_rect)
+        painter.end()
 
 
 # ---------------------------------------------------------------------------
@@ -1484,6 +1626,8 @@ class PlotSettingsPanel(QScrollArea):
 
         self._series_widgets: List[SeriesWidget] = []
         self._plot_type = PLOT_TYPES[0]
+        self._legend_x: float = 0.65
+        self._legend_y: float = 0.92
 
         inner = QWidget()
         self._main_layout = QVBoxLayout(inner)
@@ -1736,6 +1880,8 @@ class PlotSettingsPanel(QScrollArea):
             self.gridx_cb.setChecked(config.grid_x)
             self.gridy_cb.setChecked(config.grid_y)
             self.legend_cb.setChecked(config.show_legend)
+            self._legend_x = config.legend_x
+            self._legend_y = config.legend_y
             self.latex_edit.setText(config.latex_text)
             self.latex_x_spin.setValue(config.latex_x)
             self.latex_y_spin.setValue(config.latex_y)
@@ -1801,6 +1947,8 @@ class PlotSettingsPanel(QScrollArea):
             grid_x=self.gridx_cb.isChecked(),
             grid_y=self.gridy_cb.isChecked(),
             show_legend=self.legend_cb.isChecked(),
+            legend_x=self._legend_x,
+            legend_y=self._legend_y,
             latex_text=self.latex_edit.text(),
             latex_x=self.latex_x_spin.value(),
             latex_y=self.latex_y_spin.value(),
@@ -1899,6 +2047,7 @@ class PlotTab(QWidget):
         splitter.addWidget(self.settings)
 
         self.preview = ScalableImageLabel()
+        self.preview.legend_moved.connect(self._on_legend_moved)
         splitter.addWidget(self.preview)
 
         splitter.setSizes([370, 900])
@@ -1922,6 +2071,12 @@ class PlotTab(QWidget):
             if pm.isNull():
                 raise PlotError("ROOT generated an unreadable image.")
             self.preview.set_plot_pixmap(pm)
+            if config.show_legend:
+                n = sum(1 for s in config.series if s.raw_text.strip())
+                lx, ly = config.legend_x, config.legend_y
+                self.preview.set_legend_ndc(lx, max(0.0, ly - n * 0.07), min(1.0, lx + 0.27), ly)
+            else:
+                self.preview.set_legend_ndc(0, 0, 0, 0)
             self.export_btn.setEnabled(True)
             self.export_c_btn.setEnabled(True)
             self.export_root_btn.setEnabled(True)
@@ -1954,6 +2109,13 @@ class PlotTab(QWidget):
                 "color: #cc3333; font-style: italic; font-size: 12px;"
             )
             self.status_label.setText(f"Unexpected error: {exc}")
+
+    def _on_legend_moved(self, lx: float, ly: float) -> None:
+        config = self.settings.get_config()
+        config.legend_x = max(0.0, min(0.73, lx))
+        config.legend_y = max(0.07, min(1.0, ly))
+        self.settings.apply_config(config)
+        self._do_render()
 
     def _default_path(self, ext: str) -> str:
         """Build a default save/load path from the remembered directory and stem."""
