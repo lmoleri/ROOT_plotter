@@ -117,6 +117,7 @@ class SeriesData:
     marker_style: int = ROOT.kFullCircle
     draw_style: str = "HIST"
     line_width: int = 2
+    marker_size: float = 1.2
     fill_style: int = 0
 
 
@@ -580,7 +581,7 @@ def _draw_tgraph(canvas: ROOT.TCanvas, config: PlotConfig, uid: str) -> Tuple[li
         g.SetTitle(series.name)
         g.SetMarkerStyle(series.marker_style)
         g.SetMarkerColor(series.color_index)
-        g.SetMarkerSize(1.2)
+        g.SetMarkerSize(series.marker_size)
         g.SetLineColor(series.color_index)
         g.SetLineWidth(series.line_width)
 
@@ -839,7 +840,7 @@ def _macro_tgraph(L: list, config: PlotConfig) -> None:
             f'  {vn}->SetTitle("{_c_esc(series.name)}");',
             f"  {vn}->SetMarkerStyle({series.marker_style});",
             f'  {vn}->SetMarkerColor(TColor::GetColor("{series.color_hex}"));',
-            f"  {vn}->SetMarkerSize(1.2);",
+            f"  {vn}->SetMarkerSize({series.marker_size:.2g});",
             f'  {vn}->SetLineColor(TColor::GetColor("{series.color_hex}"));',
             f"  {vn}->SetLineWidth({series.line_width});",
             f'  mg->Add({vn}, "{series.draw_style}");',
@@ -1071,6 +1072,7 @@ def _introspect_tgraph(prims: list, config: PlotConfig, warnings: list) -> None:
             color_index=color_idx,
             color_hex=_color_to_hex(color_idx),
             marker_style=int(g.GetMarkerStyle()),
+            marker_size=float(g.GetMarkerSize()),
             line_width=int(g.GetLineWidth()),
             draw_style=draw_style,
         ))
@@ -1470,7 +1472,7 @@ class SeriesWidget(QWidget):
         appearance.addWidget(self.style_combo, 1)
         layout.addLayout(appearance)
 
-        # Line width
+        # Line width / Marker size
         lw_row = QHBoxLayout()
         lw_row.addWidget(QLabel("Line width:"))
         self.lw_spin = QSpinBox()
@@ -1479,6 +1481,15 @@ class SeriesWidget(QWidget):
         self.lw_spin.valueChanged.connect(self.changed)
         lw_row.addWidget(self.lw_spin)
         lw_row.addStretch()
+        self._ms_label = QLabel("Marker size:")
+        self.ms_spin = QDoubleSpinBox()
+        self.ms_spin.setRange(0.1, 5.0)
+        self.ms_spin.setSingleStep(0.1)
+        self.ms_spin.setDecimals(1)
+        self.ms_spin.setValue(1.2)
+        self.ms_spin.valueChanged.connect(self.changed)
+        lw_row.addWidget(self._ms_label)
+        lw_row.addWidget(self.ms_spin)
         layout.addLayout(lw_row)
 
         # Data input toggle
@@ -1546,6 +1557,8 @@ class SeriesWidget(QWidget):
         is_graph = self._plot_type.startswith("TGraph")
         self._marker_label.setVisible(is_graph)
         self.marker_combo.setVisible(is_graph)
+        self._ms_label.setVisible(is_graph)
+        self.ms_spin.setVisible(is_graph)
 
     def _toggle_input_mode(self) -> None:
         self.input_stack.setCurrentIndex(0 if self.paste_radio.isChecked() else 1)
@@ -1605,6 +1618,7 @@ class SeriesWidget(QWidget):
             marker_style=marker_style,
             draw_style=draw_style,
             line_width=self.lw_spin.value(),
+            marker_size=self.ms_spin.value(),
             fill_style=fill_style,
         )
 
@@ -1921,6 +1935,7 @@ class PlotSettingsPanel(QScrollArea):
                         sw.style_combo.setCurrentIndex(si)
                         break
                 sw.lw_spin.setValue(series.line_width)
+                sw.ms_spin.setValue(series.marker_size)
                 self._series_widgets.append(sw)
                 self._series_layout.addWidget(sw)
         finally:
